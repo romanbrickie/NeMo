@@ -29,8 +29,6 @@ class SpeechLMAutoResume(AutoResume):
     Wrapper for AutoResume to get rid of requirement on restore_config.
     """
 
-    adapter_path: Optional[str] = None
-
     def get_trainer_ckpt_path(self, model: Optional[io.ConnectorMixin] = None) -> Optional[Path]:
         if self.resume_from_path:
             maybe_weights_path = self.get_weights_path(self.resume_from_path)
@@ -48,13 +46,10 @@ class SpeechLMAutoResume(AutoResume):
                 checkpoint = maybe_weights_path
 
         if checkpoint:
-            if self.adapter_path:
-                return AdapterPath(Path(self.adapter_path), base_model_path=checkpoint)
+            adapter_meta_path = checkpoint / ADAPTER_META_FILENAME
+            if adapter_meta_path.exists():
+                return AdapterPath(checkpoint, base_model_path=checkpoint)
             else:
-                adapter_meta_path = checkpoint / ADAPTER_META_FILENAME
-                if adapter_meta_path.exists():
-                    return AdapterPath(checkpoint, base_model_path=checkpoint)
-                else:
-                    return Path(checkpoint)
+                return Path(checkpoint)
 
         return None
