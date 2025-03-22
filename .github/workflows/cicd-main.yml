@@ -1777,6 +1777,9 @@ jobs:
       SCRIPT: |-
         RUN_ID=${{ github.run_id }} bash tests/functional_tests/L2_NeMo_2_Automodel_PTQ_trtllm.sh
 
+      AFTER_SCRIPT: |
+        rm -rf /tmp/trtllm_quantized
+
   L2_NeMo_2_Automodel_PTQ_hf:
     needs: [pre-flight, cicd-test-container-build]
     uses: ./.github/workflows/_test_template.yml
@@ -1785,6 +1788,9 @@ jobs:
       RUNNER: self-hosted-azure
       SCRIPT: |-
         RUN_ID=${{ github.run_id }} bash tests/functional_tests/L2_NeMo_2_Automodel_PTQ_hf.sh
+
+      AFTER_SCRIPT: |
+        rm -rf /tmp/hf_quantized
 
   L2_NeMo_2_PTQ_Llama2_FP8_trtllm:
     needs: [pre-flight, cicd-test-container-build]
