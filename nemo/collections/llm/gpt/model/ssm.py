@@ -87,7 +87,9 @@ class SSMConfig(TransformerConfig, io.IOMixin):
     forward_step_fn: Callable = ssm_forward_step
     data_step_fn: Callable = gpt_data_step
     tokenizer_model_path: str = None
-    mamba_stack_spec: Union[ModuleSpec, Callable[[], ModuleSpec]] = field(default_factory=lambda: default_mamba_stack_spec)
+    mamba_stack_spec: Union[ModuleSpec, Callable[[], ModuleSpec]] = field(
+        default_factory=lambda: default_mamba_stack_spec
+    )
 
     def configure_model(self, tokenizer, pre_process=None, post_process=None) -> "MCoreMambaModel":
 
