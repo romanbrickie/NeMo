@@ -13,16 +13,16 @@
 # limitations under the License.
 
 import os
-from tqdm import tqdm
 from typing import Dict, List, Optional, Union
 
 import lightning.pytorch as pl
 import torch
 import torch.distributed as dist
 from datasets import Dataset, DatasetDict, load_dataset
+from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
-from torch.nn import functional as F
+from tqdm import tqdm
 
 from nemo.lightning.pytorch.plugins import MegatronDataSampler
 from nemo.utils import logging
@@ -30,6 +30,7 @@ from nemo.utils import logging
 # TODO Move it to utils or somethings for sake of clean code
 CROSS_ENTROPY_IGNORE_IDX = -100
 PACK_TYPE = Dict[str, Union[torch.Tensor, List[int]]]
+
 
 def clean_split(name):
     """removes split from name
@@ -235,7 +236,7 @@ class HFDatasetDataModule(pl.LightningDataModule):
         self.micro_batch_size = micro_batch_size
         self.global_batch_size = global_batch_size
         self.pad_token_id = pad_token_id
-        self.return_pos_ids_only = return_pos_ids_only #TODO Applicable only if pack_sequence=true
+        self.return_pos_ids_only = return_pos_ids_only  # TODO Applicable only if pack_sequence=true
         self.use_mcore_sampler = use_mcore_sampler
         self.mcore_dataloader_type = mcore_dataloader_type
         self.use_dist_sampler = use_dist_sampler
@@ -248,6 +249,7 @@ class HFDatasetDataModule(pl.LightningDataModule):
 
     def collate_fn(self, batch, pad_token_id=0):
         """Default batch collator"""
+
         def batchify(tensor):
             if tensor.ndim == 1:
                 return tensor.unsqueeze_(0)
@@ -438,9 +440,7 @@ class HFDatasetDataModule(pl.LightningDataModule):
         # Return the length of the first sample in next pack if we are splitting across packs,
         # otherwise return the length of the last sample in the current pack
         next_seq_len = (
-            len(current_pack["tokens"][boundary:])
-            if self.split_across_pack
-            else current_pack["seq_lens"][-1]
+            len(current_pack["tokens"][boundary:]) if self.split_across_pack else current_pack["seq_lens"][-1]
         )
 
         return {
@@ -472,7 +472,7 @@ class HFDatasetDataModule(pl.LightningDataModule):
         self.split_across_pack = split_across_pack
         self.max_packs = max_packs
         ## 'TODO' check if nemo's impl also does this padding
-        self.padding_idx = 0 # Padding value to pack a sequence to self.packed_sequence_size
+        self.padding_idx = 0  # Padding value to pack a sequence to self.packed_sequence_size
 
         # Only show progress bar on rank 0
         rank = (
@@ -516,10 +516,7 @@ class HFDatasetDataModule(pl.LightningDataModule):
 
                 # If the current pack is over the packed_sequence_size, add it to self.packs and
                 # retain any truncated or bumped samples for next pack
-                while (
-                    len(current_pack["tokens"]) > packed_sequence_size
-                    and not self._should_stop_packing()
-                ):
+                while len(current_pack["tokens"]) > packed_sequence_size and not self._should_stop_packing():
                     current_pack = self._split_and_add_pack(current_pack)
 
                 if rank == 0:
@@ -532,16 +529,14 @@ class HFDatasetDataModule(pl.LightningDataModule):
                     break
 
             # Handle the last pack if there's leftover and we haven't filled up the max packs
-            if len(current_pack["tokens"]) > 0 and (
-                self.max_packs is None or len(self.packs) < self.max_packs
-            ):
+            if len(current_pack["tokens"]) > 0 and (self.max_packs is None or len(self.packs) < self.max_packs):
                 # No need to handle splitting at this point so we can just add the current pack
                 self._add_pack(current_pack)
 
             # After packing all samples, convert self.packs to a Dataset object
-            packed_dataset = Dataset.from_dict({
-                key: [pack[key] for pack in self.packs] for key in self.packs[0].keys()
-            })
+            packed_dataset = Dataset.from_dict(
+                {key: [pack[key] for pack in self.packs] for key in self.packs[0].keys()}
+            )
 
             # Assign the packed dataset to self.dataset_splits[split]
             self.dataset_splits[split] = packed_dataset

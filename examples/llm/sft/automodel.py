@@ -45,8 +45,11 @@ def make_squad_hf_dataset(tokenizer, batch_size, packed_sequence_size):
         )
 
     datamodule = llm.HFDatasetDataModule(
-        "rajpurkar/squad", split="train", micro_batch_size=batch_size, pad_token_id=tokenizer.eos_id or 0,
-        return_pos_ids_only=True
+        "rajpurkar/squad",
+        split="train",
+        micro_batch_size=batch_size,
+        pad_token_id=tokenizer.eos_id or 0,
+        return_pos_ids_only=True,
     )
     ## tokenization is happening here
     datamodule.map(
@@ -119,9 +122,14 @@ def main():
     parser.add_argument('--use-torch-jit', action='store_true')
     parser.add_argument('--auto-resume', action='store_true')
     parser.add_argument('--batch-size', type=int, default=1)
-    parser.add_argument('--packed-sequence-size', type=int, default=-1, help='If a positive integer, this arg'
-    'enables training with sequence packing and specifies the pack size. If less than or equal to 0, sequence '
-    'packing is disabled.')
+    parser.add_argument(
+        '--packed-sequence-size',
+        type=int,
+        default=-1,
+        help='If a positive integer, this arg'
+        'enables training with sequence packing and specifies the pack size. If less than or equal to 0, sequence '
+        'packing is disabled.',
+    )
     args = parser.parse_args()
 
     wandb = None
