@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import os
+from tqdm import tqdm
+from typing import Dict, List, Optional, Union
 
 import lightning.pytorch as pl
 import torch
@@ -20,10 +22,14 @@ import torch.distributed as dist
 from datasets import Dataset, DatasetDict, load_dataset
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.nn import functional as F
 
 from nemo.lightning.pytorch.plugins import MegatronDataSampler
 from nemo.utils import logging
 
+# TODO Move it to utils or somethings for sake of clean code
+CROSS_ENTROPY_IGNORE_IDX = -100
+PACK_TYPE = Dict[str, Union[torch.Tensor, List[int]]]
 
 def clean_split(name):
     """removes split from name
@@ -189,7 +195,6 @@ class HFDatasetDataModule(pl.LightningDataModule):
         pad_token_id=0,
         use_mcore_sampler=False,
         use_dist_sampler=False,
-        pack_sequence=False,
         return_pos_ids_only=False,
         mcore_dataloader_type='cyclic',
         train_aliases=["train", "training"],
@@ -219,7 +224,7 @@ class HFDatasetDataModule(pl.LightningDataModule):
         self.dataset_splits = make_dataset_splits(dataset, split, split_aliases)
 
         if collate_fn is None:
-            self._collate_fn = lambda x: HFDatasetDataModule.collate_fn(x, pad_token_id=self.pad_token_id)
+            self._collate_fn = lambda x: self.collate_fn(x, pad_token_id=self.pad_token_id)
         else:
             self._collate_fn = collate_fn
 
@@ -230,7 +235,6 @@ class HFDatasetDataModule(pl.LightningDataModule):
         self.micro_batch_size = micro_batch_size
         self.global_batch_size = global_batch_size
         self.pad_token_id = pad_token_id
-        self.pack_sequence = pack_sequence
         self.return_pos_ids_only = return_pos_ids_only #TODO Applicable only if pack_sequence=true
         self.use_mcore_sampler = use_mcore_sampler
         self.mcore_dataloader_type = mcore_dataloader_type
@@ -242,46 +246,8 @@ class HFDatasetDataModule(pl.LightningDataModule):
         dataset = Dataset.from_dict(dataset_dict)
         return HFDatasetDataModule(path_or_dataset=dataset, split=split, **kwargs)
 
-    @staticmethod
-    def get_attention_mask_for_packed_sequence(tokenized_sentences, return_pos_ids_only: bool = False): #TODO tokenizer
-        eos_token_id = 50256 #TODO get from tokenizer for all eos_token_id below
-        # : tokenizer.eos_token_id
-        batch = torch.nn.utils.rnn.pad_sequence(
-        [tokenized_sentences],
-        batch_first=True, padding_value=eos_token_id
-        )
-
-        B, T = batch.shape
-        eos_idx = (batch.view(-1) == eos_token_id) \
-            .nonzero(as_tuple=True)[0] + 1
-
-        eos_idx_expanded = torch.cat(
-            [eos_idx, torch.arange(0,B*T+1,T)]
-            ).unique().sort()[0]
-
-        normalized_idx = eos_idx_expanded - (eos_idx_expanded // T) * T
-        normalized_idx = torch.where(normalized_idx == 0, T, normalized_idx)
-
-        reps = normalized_idx[1:] - normalized_idx[:-1]
-        reps = torch.where(reps < 1, normalized_idx[1:], reps)
-
-        pos_ids = (torch.arange(B*T) - torch.repeat_interleave(eos_idx_expanded[:-1], reps)).view(B,T)
-        if return_pos_ids_only:
-            return pos_ids
-
-        repeated_idx = torch.repeat_interleave(
-        normalized_idx[1:], reps
-        ).view(B,1,T).expand(-1,T,-1)
-
-        mask_indices = torch.arange(T).view(1,-1,1).expand(B, -1, T)
-        # create mask
-        mask = torch.ones(T, T, dtype=torch.bool).tril().expand(B, -1, -1)
-        mask = mask.masked_fill(mask_indices >= repeated_idx, False)
-        return mask
-
     def collate_fn(self, batch, pad_token_id=0):
         """Default batch collator"""
-
         def batchify(tensor):
             if tensor.ndim == 1:
                 return tensor.unsqueeze_(0)
@@ -294,7 +260,7 @@ class HFDatasetDataModule(pl.LightningDataModule):
             max_len = max(map(len, batch))
             return [item + [pad_token_id] * (max_len - len(item)) for item in batch]
 
-        output_dict={
+        return {
             key: batchify(
                 torch.LongTensor(
                     pad_within_micro(
@@ -305,13 +271,6 @@ class HFDatasetDataModule(pl.LightningDataModule):
             )
             for key in batch[0].keys()
         }
-        if self.pack_sequence:
-            if self.return_pos_ids_only:
-                output_dict["pos_ids"] = self.get_attention_mask_for_packed_sequence(output_dict['input_ids'], self.return_pos_ids_only)# tokenizer)
-            else:
-                output_dict["attn_mask"] = self.get_attention_mask_for_packed_sequence(output_dict['input_ids']) #TODO tojenizer
-
-        return output_dict
 
     def setup(self, stage: str):
         """setups sampler"""
@@ -393,6 +352,199 @@ class HFDatasetDataModule(pl.LightningDataModule):
             if subset is None:
                 continue
             dataset_splits[split_name] = subset.map(function, **kwargs)
+
+    def _convert_to_tensors(self, pack: PACK_TYPE) -> PACK_TYPE:
+        """Converts a pack into tensors. Pack comes in as a dict of lists and is converted to tensors."""
+        return {
+            "tokens": torch.tensor(pack["tokens"], dtype=torch.long),
+            "labels": torch.tensor(pack["labels"], dtype=torch.long),
+            "input_pos": torch.tensor(pack["input_pos"], dtype=torch.long),
+            "seq_lens": torch.tensor(pack["seq_lens"], dtype=torch.long),
+        }
+
+    def _pad_pack(self, pack: PACK_TYPE, padding_idx: int) -> PACK_TYPE:
+        """Pads a pack to ``self.packed_sequence_size``."""
+        # Pad tokens
+        num_padding_tokens = self.packed_sequence_size - len(pack["tokens"])
+        padded_tokens = F.pad(
+            pack["tokens"],
+            (0, num_padding_tokens),
+            value=padding_idx,
+        )
+
+        # Pad labels
+        padded_labels = F.pad(
+            pack["labels"],
+            (0, self.packed_sequence_size - len(pack["labels"])),
+            value=CROSS_ENTROPY_IGNORE_IDX,
+        )
+
+        # Add padding tokens as a last seq len to ensure sum is max_seq_len
+        padded_seq_lens = (
+            torch.cat([pack["seq_lens"], torch.tensor([num_padding_tokens])])
+            if num_padding_tokens > 0
+            else pack["seq_lens"]
+        )
+
+        # Pad input_pos continuing the sequence from last value
+        # in input_pos
+        # e.g. [0 1 2] -> [0 1 2 3 4 5] for self.packed_sequence_size = 6
+        num_range = torch.arange(
+            pack["input_pos"][-1] + 1,
+            pack["input_pos"][-1] + self.packed_sequence_size - len(pack["input_pos"]) + 1,
+        )
+        # Clamp to max_seq_len - 1 to avoid out of bounds error
+        clamped_num_range = torch.clamp(num_range, 0, self.packed_sequence_size - 1)
+        padded_input_pos = torch.cat([pack["input_pos"], clamped_num_range])
+
+        return {
+            "tokens": padded_tokens,
+            "labels": padded_labels,
+            "input_pos": padded_input_pos,
+            "seq_lens": padded_seq_lens,
+        }
+
+    def _add_pack(self, pack: PACK_TYPE) -> None:
+        """Processes, pads and adds a pack to ``self.packs``."""
+        pack = self._convert_to_tensors(pack)
+        pack = self._pad_pack(pack, padding_idx=self.padding_idx)
+        self.packs.append(pack)
+
+    def _split_and_add_pack(self, current_pack: PACK_TYPE) -> PACK_TYPE:
+        """Splits the current pack at the boundary, processes it, adds it to ``self.packs`` and
+        returns the start of the next pack."""
+
+        if self.split_across_pack:
+            boundary = self.packed_sequence_size
+            # The last elem in ``seq_lens`` ensures that ``sum(seq_lens) == self.max_seq_len``
+            leftover_seq_len = self.packed_sequence_size - sum(current_pack["seq_lens"][:-1])
+            seq_len_padding = [leftover_seq_len] if leftover_seq_len > 0 else []
+        else:
+            boundary = self.previous_sample_boundary
+            # If we aren't splitting across packs, we leave out the last sample b/c
+            # it will go into the next pack
+            seq_len_padding = []
+
+        pack = {
+            "tokens": current_pack["tokens"][:boundary],
+            "labels": current_pack["labels"][:boundary],
+            "input_pos": current_pack["input_pos"][:boundary],
+            "seq_lens": current_pack["seq_lens"][:-1] + seq_len_padding,
+        }
+
+        # Process and add the pack
+        self._add_pack(pack)
+
+        # Return the length of the first sample in next pack if we are splitting across packs,
+        # otherwise return the length of the last sample in the current pack
+        next_seq_len = (
+            len(current_pack["tokens"][boundary:])
+            if self.split_across_pack
+            else current_pack["seq_lens"][-1]
+        )
+
+        return {
+            "tokens": current_pack["tokens"][boundary:],
+            "labels": current_pack["labels"][boundary:],
+            "input_pos": current_pack["input_pos"][boundary:],
+            "seq_lens": [next_seq_len],
+        }
+
+    def _should_stop_packing(self) -> bool:
+        """If max packs is set, stop packing when we reach that number."""
+
+        if self.max_packs is not None and len(self.packs) == self.max_packs:
+            return True
+        return False
+
+    def pack(self, packed_sequence_size, split_across_pack=False, max_packs=None):
+        """Iterate through the dataset. Use a buffer to hold samples until max_seq_len,
+        then append the buffer to self.packs as a single "packed" sample. Continue
+        until max_packs or end of dataset.
+
+        Args:
+
+        Returns:
+
+
+        """
+        self.packed_sequence_size = packed_sequence_size
+        self.split_across_pack = split_across_pack
+        self.max_packs = max_packs
+        ## 'TODO' check if nemo's impl also does this padding
+        self.padding_idx = 0 # Padding value to pack a sequence to self.packed_sequence_size
+
+        # Only show progress bar on rank 0
+        rank = (
+            torch.distributed.get_rank()
+            if torch.distributed.is_available() and torch.distributed.is_initialized()
+            else 0
+        )
+
+        # Pack dataset in each split of self.dataset_splits (i.e 'train', 'val', 'test')
+        for split, ds in self.dataset_splits.items():
+            if ds is None:
+                continue
+            self.packs: List[PACK_TYPE] = []
+            # Buffer to hold samples until they are long enough to be added to self.packs
+            current_pack = {
+                "tokens": [],
+                "labels": [],
+                "input_pos": [],
+                "seq_lens": [],
+            }
+            self.previous_sample_boundary: int = 0
+            if rank == 0:
+                pbar = tqdm(total=len(ds), desc=f"Packing {split} dataset", dynamic_ncols=True)
+            for sample in ds:
+                tokens, labels = sample["input_ids"], sample["labels"]
+                # If the dataset outputs samples that are larger than the specified
+                # packed_sequence_size and we're unable to split it, user needs to modify
+                # one of the two parameters
+                seq_len = len(tokens)
+                if seq_len > packed_sequence_size and not split_across_pack:
+                    raise ValueError(
+                        f"Dataset sample is too long ({seq_len} > {self.max_seq_len}). "
+                        "Please set `split_across_pack=True` or increase `max_seq_len`."
+                    )
+                # Update the current pack
+                # "input_pos" is the pos ids, "seq_lens" is the len of each seq within the pack
+                current_pack["tokens"] += tokens
+                current_pack["labels"] += labels
+                current_pack["input_pos"] += [x % packed_sequence_size for x in range(seq_len)]
+                current_pack["seq_lens"] += [seq_len]
+
+                # If the current pack is over the packed_sequence_size, add it to self.packs and
+                # retain any truncated or bumped samples for next pack
+                while (
+                    len(current_pack["tokens"]) > packed_sequence_size
+                    and not self._should_stop_packing()
+                ):
+                    current_pack = self._split_and_add_pack(current_pack)
+
+                if rank == 0:
+                    pbar.update()
+
+                # Keep track of previous sample boundary
+                self.previous_sample_boundary = len(current_pack["tokens"])
+
+                if self._should_stop_packing():
+                    break
+
+            # Handle the last pack if there's leftover and we haven't filled up the max packs
+            if len(current_pack["tokens"]) > 0 and (
+                self.max_packs is None or len(self.packs) < self.max_packs
+            ):
+                # No need to handle splitting at this point so we can just add the current pack
+                self._add_pack(current_pack)
+
+            # After packing all samples, convert self.packs to a Dataset object
+            packed_dataset = Dataset.from_dict({
+                key: [pack[key] for pack in self.packs] for key in self.packs[0].keys()
+            })
+
+            # Assign the packed dataset to self.dataset_splits[split]
+            self.dataset_splits[split] = packed_dataset
 
 
 class SquadHFDataModule(HFDatasetDataModule):
