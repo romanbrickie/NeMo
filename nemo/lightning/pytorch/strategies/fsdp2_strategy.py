@@ -79,7 +79,6 @@ class FSDP2Strategy(PLModelParallelStrategy, io.IOMixin):
         checkpoint_io=None,
         mp_policy=None,
         parallelize_fn=fsdp2_strategy_parallelize,
-        unified_model_parallel: bool = False,
         loss_reduce_meshes: Optional[Tuple[str, ...]] = None,
         **kwargs,
     ):
@@ -101,8 +100,6 @@ class FSDP2Strategy(PLModelParallelStrategy, io.IOMixin):
                 )
                 ```
             parallelize_fn (callable, optional): Function for parallelizing the model. Defaults to None.
-            unified_model_parallel (bool): Use unified model parallelism, i.e. the same device mesh of size DP x CP x TP for all dimensions of parallelism.
-                Significantly improves memory utilization when scaling to large sequence / context lengths, but slower than having separate dimensions for DP, CP, and TP.
             loss_reduce_meshes (Optional[Tuple[str, ...]]): For loss reduction, flatten the specified tuple of named mesh dimensions to reduce across for loss computation, e.g. ("data_parallel", "context_parallel").
                 Supported Parallelisms: {"data_parallel", "context_parallel", "tensor_parallel"}
                 Default: None, which uses the canonical data parallel mesh for loss reduction.
@@ -130,7 +127,6 @@ class FSDP2Strategy(PLModelParallelStrategy, io.IOMixin):
             "context_parallel": self.context_parallel_size,
             "tensor_parallel": self._tensor_parallel_size,
         }
-        self.unified_model_parallel = unified_model_parallel
         self.loss_reduce_meshes = self._validate_mesh_dimensions(loss_reduce_meshes, mesh_type="loss reduction")
 
     def _validate_mesh_dimensions(
@@ -227,22 +223,14 @@ class FSDP2Strategy(PLModelParallelStrategy, io.IOMixin):
         if self._tensor_parallel_size == "auto":
             self._tensor_parallel_size = self.num_processes
 
-        if self.unified_model_parallel:
-            _logger.info(f"Using unified model parallelism with {self.parallel_dims} = {math.prod(self.parallel_dims.values())} devices.")
-            self._device_mesh = init_device_mesh(
-                device_type=self.root_device.type,
-                mesh_shape=(math.prod(self.parallel_dims.values()),),  # Unified device mesh.
-                mesh_dim_names=("data_parallel",),  # Utilize the "data_parallel" mesh for unified model parallelism, because FSDP uses this keyword when retrieving the device mesh, and the loss reduction mesh is set to "data_parallel" by default.
-            )
-        else:
-            # TODO: TP is currently not supported. But we still create a device mesh for TP.
-            mesh_dim_names, mesh_shape = zip(*self.parallel_dims.items())
+        # TODO: TP is currently not supported. But we still create a device mesh for TP.
+        mesh_dim_names, mesh_shape = zip(*self.parallel_dims.items())
 
-            self._device_mesh = init_device_mesh(
-                device_type=self.root_device.type,
-                mesh_shape=mesh_shape,
-                mesh_dim_names=mesh_dim_names,
-            )
+        self._device_mesh = init_device_mesh(
+            device_type=self.root_device.type,
+            mesh_shape=mesh_shape,
+            mesh_dim_names=mesh_dim_names,
+        )
 
         # Construct sharding and reduction meshes for specific configurations.
         # Replace existing mesh strategies if a custom mesh design is provided.

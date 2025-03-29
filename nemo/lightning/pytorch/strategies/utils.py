@@ -486,7 +486,7 @@ def fsdp2_strategy_parallelize(
             for name, sub_module in module.named_children():
                 parallelize_helper(sub_module, mesh, mp_policy)
 
-    dp_mesh = device_mesh["data_parallel"]
+    dp_mesh = device_mesh["context_parallel"]
     if dp_mesh.size() > 1:
         assert dp_mesh.ndim == 1, "Hybrid-sharding not supported"
 

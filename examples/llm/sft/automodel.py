@@ -84,7 +84,6 @@ def make_strategy(
     dp_size=None,
     tp_size=None,
     cp_size=None,
-    unified_model_parallel=False,
     loss_reduce_meshes=None,
 ):
     if strategy == 'auto':
@@ -128,7 +127,6 @@ def make_strategy(
             context_parallel_size=cp_size,
             checkpoint_io=model.make_checkpoint_io(adapter_only=adapter_only),
             offload_policy=offload_policy,
-            unified_model_parallel=unified_model_parallel,
             loss_reduce_meshes=loss_reduce_meshes,
         )
     else:
@@ -172,11 +170,6 @@ def main():
     parser.add_argument('--dp-size', type=int, default=None, help='Data Parallel size; to be used with fsdp2')
     parser.add_argument('--tp-size', type=int, default=None, help='Tensor Parallel size; to be used with fsdp2')
     parser.add_argument('--cp-size', type=int, default=None, help='Context Parallel size; to be used with fsdp2')
-    parser.add_argument(
-        '--unified-model-parallel',
-        action='store_true',
-        help='Use unified model parallelism, i.e. the same device mesh of size DP x CP x TP for all dimensions of parallelism. Significantly improves memory utilization when scaling to large sequence / context lengths, but slower than having separate dimensions for DP, CP, and TP.'
-    )
     parser.add_argument('--use-te-optimizer', action='store_true', help='Use TE optimizer')
     parser.add_argument('--grad-clip', type=float, default=1.0, help='Grad clip value')
     parser.add_argument(
@@ -262,7 +255,6 @@ def main():
         dp_size=args.dp_size,
         tp_size=args.tp_size,
         cp_size=args.cp_size,
-        unified_model_parallel=args.unified_model_parallel,
         loss_reduce_meshes=args.loss_reduce_mesh,
     )
 
