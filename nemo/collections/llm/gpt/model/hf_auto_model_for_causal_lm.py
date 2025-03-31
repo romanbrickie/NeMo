@@ -21,7 +21,7 @@ import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
 from nemo.automodel.loss import masked_cross_entropy
-from nemo.automodel.loss.linear_ce import HAVE_LINEAR_LOSS_CE, fused_linear_cross_entropy
+from nemo.automodel.loss.linear_ce import HAVE_LINEAR_LOSS_CE, fused_linear_cross_entropy, HAVE_CCE_PATCH, cce_patch
 from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import AutoTokenizer
 from nemo.collections.llm import fn
 from nemo.lightning import io
@@ -50,6 +50,7 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
         load_in_4bit=False,
         attn_implementation="sdpa",
         use_liger_kernel=False,
+        use_linear_ce=False,
         enable_grad_ckpt=False,
         device_map="cpu",
     ):
@@ -87,6 +88,11 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
         self.load_in_4bit = load_in_4bit
         self.attn_implementation = attn_implementation
         self.use_liger_kernel = use_liger_kernel
+        self.use_linear_ce = use_linear_ce
+        self.linear_ce_patched = False
+        if use_linear_ce and not HAVE_LINEAR_LOSS_CE:
+            logging.warning("Asked to use Linear_CE but failed to import")
+            self.use_linear_ce = False
         self.device_map = device_map
         # holds loss values until optim step.
         self.loss_buffer = []
@@ -194,6 +200,17 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
             else:
                 raise e
 
+        if self.use_linear_ce:
+            # Try to use cce_patch, if model is not supported
+            try:
+                self.model = cce_patch(self.model)
+                self.linear_ce_patched = True
+            except RuntimeError as e:
+                if not "Unknown model type" in str(e):
+                    raise e
+                else:
+                    logging.warning("Linear_CE does not support {} via cce_patch".format(type(self.model).__name__))
+
         if self.model_accelerator is not None:
             from nemo.lightning.pytorch.accelerate.transformer_engine import te_accelerate
 
@@ -248,18 +265,20 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
             logging.warning("Switching CheckpointIO from MegatronCheckpointIO to HFCheckpointIO.")
             self.trainer.strategy.checkpoint_io = self.make_checkpoint_io(self._has_lora_adapter)
 
-        labels = batch.pop('labels').to(self.model.device)
-        loss_mask = batch.pop('loss_mask', None)
+        num_labels = batch['labels'].numel()
+        if not self.linear_ce_patched:
+            labels = batch.pop('labels').to(self.model.device)
+            loss_mask = batch.pop('loss_mask', None)
 
         # GPTSFTDataset emits `tokens` instead of `input_ids`
         if 'input_ids' not in batch and 'tokens' in batch:
             batch['input_ids'] = batch['tokens']
         batch = self._remove_extra_batch_keys(batch)
-        batch["output_hidden_states"] = True if HAVE_LINEAR_LOSS_CE else False  # Enable hidden states output
+        batch["output_hidden_states"] = self.use_linear_ce # Enable hidden states output
 
         outputs = self.forward(batch)
 
-        if not HAVE_LINEAR_LOSS_CE:
+        if not self.use_linear_ce:
             # Prepare for loss calculation
             logits = outputs.logits
             n_cls = logits.shape[-1]
@@ -267,6 +286,8 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
             labels = labels.view(-1)
             assert logits.shape[-2] == labels.shape[-1], "Expected logits & labels to have the same length"
             loss = self.loss_fn(logits, labels, loss_mask)
+        elif self.linear_ce_patched:
+            loss = outputs.loss
         else:
             # use linear_cross_entropy
             hidden_states = outputs.hidden_states[-1]
@@ -282,7 +303,7 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
             )
         # logging
         self.loss_buffer.append(loss.item())
-        self.n_tok += labels.numel()
+        self.n_tok += num_labels
         return loss
 
     def on_before_optimizer_step(self, optimizer) -> None:
