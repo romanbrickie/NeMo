@@ -60,6 +60,7 @@ cce_patch, HAVE_CCE_PATCH = safe_import_from(
     "cce_patch",
 )
 
+
 def fused_linear_cross_entropy(
     hidden_states: torch.Tensor,
     lm_weight: torch.Tensor,

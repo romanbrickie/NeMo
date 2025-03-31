@@ -21,7 +21,7 @@ import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
 from nemo.automodel.loss import masked_cross_entropy
-from nemo.automodel.loss.linear_ce import HAVE_LINEAR_LOSS_CE, fused_linear_cross_entropy, HAVE_CCE_PATCH, cce_patch
+from nemo.automodel.loss.linear_ce import HAVE_CCE_PATCH, HAVE_LINEAR_LOSS_CE, cce_patch, fused_linear_cross_entropy
 from nemo.collections.common.tokenizers.huggingface.auto_tokenizer import AutoTokenizer
 from nemo.collections.llm import fn
 from nemo.lightning import io
