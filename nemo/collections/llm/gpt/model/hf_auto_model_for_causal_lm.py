@@ -274,7 +274,8 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
         if 'input_ids' not in batch and 'tokens' in batch:
             batch['input_ids'] = batch['tokens']
         batch = self._remove_extra_batch_keys(batch)
-        batch["output_hidden_states"] = self.use_linear_ce # Enable hidden states output
+        # Enable hidden states output
+        batch["output_hidden_states"] = self.use_linear_ce and not self.linear_ce_patched
 
         outputs = self.forward(batch)
 
