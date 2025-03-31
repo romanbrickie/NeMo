@@ -90,7 +90,7 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
         self.use_liger_kernel = use_liger_kernel
         self.use_linear_ce = use_linear_ce
         self.linear_ce_patched = False
-        if use_linear_ce and not HAVE_LINEAR_LOSS_CE:
+        if use_linear_ce and not (HAVE_LINEAR_LOSS_CE or HAVE_CCE_PATCH):
             logging.warning("Asked to use Linear_CE but failed to import")
             self.use_linear_ce = False
         self.device_map = device_map
