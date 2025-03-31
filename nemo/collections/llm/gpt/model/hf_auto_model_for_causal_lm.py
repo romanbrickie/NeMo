@@ -381,7 +381,7 @@ class HFAutoModelForCausalLM(pl.LightningModule, io.IOMixin, fn.FNMixin):
         loss_mask = batch.pop('loss_mask', None)
 
         # GPTSFTDataset emits `tokens` instead of `input_ids`
-        if 'input_ids' not in batch and 'tokens' in batch:
+        if not 'input_ids' in batch and 'tokens' in batch:
             batch['input_ids'] = batch['tokens']
         batch = self._remove_extra_batch_keys(batch)
 
